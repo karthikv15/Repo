@@ -85,27 +85,39 @@ async function loadCallWithStages(id) {
   return { ...call, stages };
 }
 
-async function askGemini(prompt) {
-  if (!GEMINI_API_KEY) throw new Error("no GEMINI_API_KEY");
+const GEMINI_BASE = process.env.GEMINI_BASE || "https://generativelanguage.googleapis.com/v1beta";
+const GEMINI_FALLBACK = process.env.GEMINI_FALLBACK_MODEL || "gemini-flash-lite-latest";
+
+async function callGeminiOnce(model, prompt, timeoutMs) {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 7000);
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-      {
-        method: "POST",
-        signal: ctl.signal,
-        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
-        }),
-      });
-    if (!r.ok) throw new Error(`gemini ${r.status}`);
+    const r = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
+      method: "POST",
+      signal: ctl.signal,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+      }),
+    });
+    if (!r.ok) throw new Error(`gemini ${r.status} (${model})`);
     const j = await r.json();
     const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
     return JSON.parse(text);
   } finally { clearTimeout(timer); }
+}
+
+// Try the main model, then a lighter fallback model if Google is busy or slow.
+async function askGemini(prompt) {
+  if (!GEMINI_API_KEY) throw new Error("no GEMINI_API_KEY");
+  const models = [...new Set([GEMINI_MODEL, GEMINI_FALLBACK])];
+  let lastErr;
+  for (const m of models) {
+    try { return await callGeminiOnce(m, prompt, 12000); }
+    catch (e) { lastErr = e; console.error("gemini attempt failed:", e.message); }
+  }
+  throw lastErr;
 }
 
 // LLM: draft a one-line summary and check the outcome the caller chose against what was recorded
